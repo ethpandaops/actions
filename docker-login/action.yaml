@@ -1,0 +1,37 @@
+name: Docker login
+description: Log in to Docker Hub
+inputs:
+  username:
+     required: true
+  password:
+     required: true
+runs:
+  using: composite
+  steps:
+    - name: Check for Docker Hub credentials
+      shell: bash
+      env:
+        DOCKER_USERNAME: ${{ inputs.username }}
+        DOCKER_PASSWORD: ${{ inputs.password }}
+      run: |
+        if [ -z "$DOCKER_USERNAME" ] || [ -z "$DOCKER_PASSWORD" ]; then
+          echo "AUTH_EXISTS=false" >> $GITHUB_ENV
+          echo "No credentials provided"
+        else
+          echo "AUTH_EXISTS=true" >> $GITHUB_ENV
+          echo "Credentials provided"
+        fi
+
+    - name: Login to Docker Hub
+      if: env.AUTH_EXISTS == 'true'
+      uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+      with:
+        username: ${{ inputs.username }}
+        password: ${{ inputs.password }}
+
+    - name: Install regctl
+      uses: regclient/actions/regctl-installer@ce5fd131e371ffcdd7508b478cb223b3511a9183
+
+    - name: Check Docker Hub Rate Limits
+      shell: bash
+      run: regctl image ratelimit ubuntu:latest
