@@ -1,0 +1,141 @@
+name: 'Claude PR Assistant'
+description: 'Standardized Claude PR assistant for ethPandaOps repositories'
+author: 'ethPandaOps'
+
+inputs:
+  claude_code_oauth_token:
+    description: 'Claude Code OAuth token for authentication'
+    required: true
+  
+  timeout_minutes:
+    description: 'Timeout for Claude operations in minutes'
+    required: false
+    default: '60'
+  
+  custom_instructions:
+    description: 'Custom instructions for Claude'
+    required: false
+    default: 'Use the create_pull_request tool to create a pull request if needed.'
+  
+  allowed_tools:
+    description: 'List of allowed tools for Claude'
+    required: false
+    default: |
+      Edit
+      Read
+      Write
+      MultiEdit
+      GlobTool
+      GrepTool
+      LS
+      TodoWrite
+      Task
+      
+      # Git operations
+      Bash(git:*)
+      Bash(git status)
+      Bash(git diff:*)
+      Bash(git log:*)
+      Bash(git add:*)
+      Bash(git commit:*)
+      Bash(git push:*)
+      Bash(git pull:*)
+      Bash(git fetch:*)
+      Bash(git checkout:*)
+      Bash(git branch:*)
+      Bash(git merge:*)
+      Bash(git rebase:*)
+      Bash(git cherry-pick:*)
+      Bash(git stash:*)
+      Bash(git reset:*)
+      
+      # GitHub CLI for PR/Issue management
+      Bash(gh:*)
+      Bash(gh pr:*)
+      Bash(gh issue:*)
+      Bash(gh api:*)
+      
+      # Go development
+      Bash(go:*)
+      Bash(go mod:*)
+      Bash(go test:*)
+      Bash(go build:*)
+      Bash(go fmt:*)
+      Bash(go vet:*)
+      Bash(gofmt:*)
+      
+      # Build tools
+      Bash(make:*)
+      Bash(bazel:*)
+      
+      # Testing and linting
+      Bash(npm test)
+      Bash(npm run test:*)
+      Bash(npm run lint:*)
+      Bash(npm run format:*)
+      Bash(go test:*)
+      
+      # Package managers
+      Bash(npm:*)
+      Bash(npm install)
+      Bash(npm ci)
+      Bash(yarn:*)
+      Bash(pip:*)
+      
+      # File operations
+      Bash(cat:*)
+      Bash(ls:*)
+      Bash(find:*)
+      Bash(grep:*)
+      Bash(chmod:*)
+      Bash(mkdir:*)
+      Bash(touch:*)
+      Bash(echo:*)
+      
+      # System info
+      Bash(pwd)
+      Bash(which:*)
+      
+      # CI/CD helpers
+      Bash(exit:*)
+      Bash(test:*)
+      
+      # MCP tools
+      mcp__github__create_pull_request
+
+  node_version:
+    description: 'Node.js version to use'
+    required: false
+    default: '23'
+  
+  experimental_allowed_domains:
+    description: 'Optional: Restrict network access to specific domains only'
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y unzip curl
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node_version }}
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+
+    - name: Run Claude PR Action
+      uses: anthropics/claude-code-action@beta
+      with:
+        claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
+        timeout_minutes: ${{ inputs.timeout_minutes }}
+        allowed_tools: ${{ inputs.allowed_tools }}
+        custom_instructions: ${{ inputs.custom_instructions }}
+        experimental_allowed_domains: ${{ inputs.experimental_allowed_domains }}
