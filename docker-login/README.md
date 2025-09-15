@@ -7,7 +7,7 @@ A composite GitHub Action for logging into Docker Hub with authentication creden
 ```yaml
 steps:
   - name: Log in to Docker Hub
-    uses: ethpandaops/actions/docker-login@main
+    uses: ethpandaops/actions/docker-login@master
     with:
       username: ${{ secrets.DOCKERHUB_USERNAME }}
       password: ${{ secrets.DOCKERHUB_TOKEN }}
