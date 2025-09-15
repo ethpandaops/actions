@@ -3,8 +3,10 @@ description: Log in to Docker Hub
 inputs:
   username:
      required: true
+     description: The username to use to log in to Docker Hub
   password:
      required: true
+     description: The password to use to log in to Docker Hub
 runs:
   using: composite
   steps:
