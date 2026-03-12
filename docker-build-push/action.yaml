@@ -21,6 +21,9 @@ inputs:
     description: 'The platforms to build the image for'
     required: false
     default: 'linux/amd64,linux/arm64'
+  build-args:
+    description: "List of build-time variables"
+    required: false
   push:
     description: 'Whether to push the image'
     required: false
@@ -70,3 +73,4 @@ runs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         platforms: ${{ inputs.platforms }}
+        build-args: ${{ inputs.build-args }}
