@@ -16,12 +16,32 @@ steps:
     uses: docker/build-push-action@...
   - uses: ethpandaops/actions/mirror-image@master
     with:
-      image: my-image
+      image: my-image   # defaults to the repository name
       tags: >-
         v1.2.3@${{ steps.build.outputs.digest }}
         latest@${{ steps.build.outputs.digest }}
       mirror-url: ${{ vars.IMAGE_MIRROR_URL }}
 ```
+
+With goreleaser, point its `image_templates` at `ghcr.io/ethpandaops/...`
+and pass its artifact list instead of tags. The action mirrors every image and
+manifest goreleaser pushed, by digest:
+
+```yaml
+  - uses: ethpandaops/actions/mirror-image@master
+    with:
+      goreleaser-artifacts: dist/artifacts.json
+      mirror-url: ${{ vars.IMAGE_MIRROR_URL }}
+```
+
+If goreleaser pushes more than one image, run the step once per image with
+`image` set.
+
+`mirror-url` has to be passed in: composite actions can't read organization
+variables themselves.
+
+If the mirror refuses, the step fails and says what to do next, for example
+asking the platform team to add the repository to the mirror's allowlist.
 
 ## What gets attested
 

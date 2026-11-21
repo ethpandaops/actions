@@ -5,15 +5,23 @@ description: >
 
 inputs:
   image:
-    description: Package name under ghcr.io/ethpandaops/
-    required: true
+    description: >
+      Package name under ghcr.io/ethpandaops/. Defaults to the image in
+      goreleaser-artifacts, or else the repository name.
+    required: false
   tags:
     description: >
       Whitespace-separated tags already pushed to ghcr.io/ethpandaops/<image>.
       Give each as tag@sha256:<digest>, with the digest your build step
       output, so the action attests what this job pushed and fails if the tag
-      has moved since. A bare tag attests whatever it points to now.
-    required: true
+      has moved since. A bare tag attests whatever it points to now. Not
+      needed with goreleaser-artifacts.
+    required: false
+  goreleaser-artifacts:
+    description: >
+      Path to goreleaser's dist/artifacts.json. The images and manifests it
+      pushed to ghcr.io/ethpandaops, with their digests, become the tags.
+    required: false
   attest-platforms:
     description: >
       Also attest the per-platform manifests behind each tag. Set to "false"
@@ -58,12 +66,44 @@ runs:
         chmod +x "$bin/regctl"
         echo "$bin" >> "$GITHUB_PATH"
 
-    - name: Resolve digests
-      id: resolve
+    - name: Collect images
+      id: collect
       shell: bash
       env:
         IMAGE: ${{ inputs.image }}
         TAGS: ${{ inputs.tags }}
+        ARTIFACTS: ${{ inputs.goreleaser-artifacts }}
+        REPO_NAME: ${{ github.event.repository.name }}
+      run: |
+        set -euo pipefail
+        err() { echo "::error title=image-mirror::$*"; exit 1; }
+        if [[ -n $ARTIFACTS ]]; then
+          [[ -z $TAGS ]] || err "Set either tags or goreleaser-artifacts, not both."
+          [[ -f $ARTIFACTS ]] || err "${ARTIFACTS} not found. Run this step after goreleaser, in the same job."
+          # name:tag@digest for every image and manifest goreleaser pushed to GHCR.
+          pushed=$(jq -r '.[] | select(.type == "Docker Image" or .type == "Published Docker Image" or .type == "Docker Manifest")
+            | select(.name | startswith("ghcr.io/ethpandaops/"))
+            | (.name | ltrimstr("ghcr.io/ethpandaops/")) + (if (.extra.Digest // "") != "" then "@" + .extra.Digest else "" end)' "$ARTIFACTS" | sort -u)
+          [[ -n $pushed ]] || err "goreleaser didn't push any images to ghcr.io/ethpandaops. Point its image_templates at ghcr.io/ethpandaops/<image>."
+          images=$(sed 's/:.*//' <<<"$pushed" | sort -u)
+          if [[ -z $IMAGE ]]; then
+            (( $(wc -l <<<"$images") == 1 )) || err "goreleaser pushed several images ($(tr '\n' ' ' <<<"$images")). Run this step once per image with 'image' set."
+            IMAGE=$images
+          fi
+          TAGS=$(awk -v img="$IMAGE" 'index($0, img ":") == 1 { print substr($0, length(img) + 2) }' <<<"$pushed" | tr '\n' ' ')
+          [[ -n ${TAGS// /} ]] || err "goreleaser didn't push ghcr.io/ethpandaops/${IMAGE}."
+        fi
+        IMAGE=${IMAGE:-$REPO_NAME}
+        [[ -n ${TAGS// /} ]] || err "No tags to mirror. Set 'tags', or 'goreleaser-artifacts' for goreleaser builds."
+        echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+        echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+    - name: Resolve digests
+      id: resolve
+      shell: bash
+      env:
+        IMAGE: ${{ steps.collect.outputs.image }}
+        TAGS: ${{ steps.collect.outputs.tags }}
         ATTEST_PLATFORMS: ${{ inputs.attest-platforms }}
         GHCR_TOKEN: ${{ inputs.github-token }}
         # Keep the registry login in this job's temp dir, not the runner's home.
@@ -127,7 +167,7 @@ runs:
       if: inputs.mirror == 'true'
       shell: bash
       env:
-        IMAGE: ${{ inputs.image }}
+        IMAGE: ${{ steps.collect.outputs.image }}
         PAIRS: ${{ steps.resolve.outputs.pairs }}
         MIRROR_URL: ${{ inputs.mirror-url }}
         AUDIENCE: ${{ inputs.audience }}
