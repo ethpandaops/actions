@@ -39,6 +39,12 @@ inputs:
   mirror:
     description: Set to "false" to attest only, without copying to Docker Hub
     default: "true"
+  attest:
+    description: >
+      Set to "false" to mirror only, without attesting, for a separate job
+      after the build job attested with mirror: "false". Re-running that job
+      retries the mirror without rebuilding.
+    default: "true"
   mirror-url:
     description: Base URL of the mirror (secrets.IMAGE_MIRROR_URL)
     required: false
@@ -51,8 +57,13 @@ inputs:
 
 outputs:
   digests:
-    description: Space-separated tag@digest pairs that were attested and mirrored
+    description: >
+      Space-separated tag@digest pairs that were attested and mirrored. Pass
+      them as tags to a mirror-only job.
     value: ${{ steps.resolve.outputs.pairs }}
+  image:
+    description: Package name the images were found under
+    value: ${{ steps.collect.outputs.image }}
 
 runs:
   using: composite
@@ -190,6 +201,7 @@ runs:
         echo "checksums=${checksums}" >> "$GITHUB_OUTPUT"
 
     - name: Attest
+      if: inputs.attest == 'true'
       uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
       with:
         subject-checksums: ${{ steps.resolve.outputs.checksums }}
@@ -202,6 +214,7 @@ runs:
         PAIRS: ${{ steps.resolve.outputs.pairs }}
         MIRROR_URL: ${{ inputs.mirror-url }}
         AUDIENCE: ${{ inputs.audience }}
+        ATTEST: ${{ inputs.attest }}
       run: |
         set -euo pipefail
         [[ -n ${ACTIONS_ID_TOKEN_REQUEST_URL:-} ]] || { echo "::error title=image-mirror::This job can't authenticate to the image mirror. Add 'id-token: write' to the job's permissions."; exit 1; }
@@ -247,6 +260,13 @@ runs:
         # A clear next step for a legitimate maintainer, without saying more
         # than the mirror already answered.
         repo_ref="${GITHUB_REPOSITORY}@${GITHUB_REF}"
+        # Re-running a job that also built and pushed would push new, unattested
+        # digests to the same tags, so only suggest it for a mirror-only job.
+        if [[ $ATTEST == false ]]; then
+          retry="Re-run this job"
+        else
+          retry="Don't re-run the build: move this step into its own job (see the mirror-image README) or ask the platform team to mirror the existing digests"
+        fi
         case $code in
           200)
             {
@@ -257,8 +277,8 @@ runs:
           401) msg="The image mirror didn't accept this job's identity. Check the job has 'id-token: write' and that 'audience' is the mirror's." ;;
           403) msg="The image mirror won't publish ${IMAGE} from ${repo_ref}. If this repository should publish ${IMAGE}, ask the platform team to add it to the image-mirror allowlist (repository, branch or tag pattern, runner type)." ;;
           422) msg="The image mirror couldn't verify or copy ${IMAGE}; the response above says why. If you changed how or where this image is built or released, ask the platform team to update its image-mirror allowlist entry." ;;
-          429) msg="The image mirror is busy. Re-run this job in a few minutes." ;;
-          *) msg="The image mirror didn't answer (HTTP ${code}). Re-run this job; if it keeps failing, tell the platform team. The image is already in GHCR." ;;
+          429) msg="The image mirror is busy. ${retry} in a few minutes." ;;
+          *) msg="The image mirror didn't answer (HTTP ${code}). ${retry}; if it keeps failing, tell the platform team. The image is already in GHCR." ;;
         esac
         echo "::error title=image-mirror::${msg}"
         echo "**${msg}**" >> "$GITHUB_STEP_SUMMARY"
