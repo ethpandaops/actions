@@ -11,17 +11,25 @@ permissions:
   attestations: write
 
 steps:
-  # ... build and push ghcr.io/ethpandaops/my-image:v1.2.3 and :latest
+  - id: meta
+    uses: docker/metadata-action@...
+    with:
+      images: ghcr.io/ethpandaops/my-image
   - id: build
     uses: docker/build-push-action@...
+    with:
+      push: true
+      tags: ${{ steps.meta.outputs.tags }}
   - uses: ethpandaops/actions/mirror-image@master
     with:
-      image: my-image   # defaults to the repository name
-      tags: >-
-        v1.2.3@${{ steps.build.outputs.digest }}
-        latest@${{ steps.build.outputs.digest }}
+      tags: ${{ steps.meta.outputs.tags }}
+      digest: ${{ steps.build.outputs.digest }}
       mirror-url: ${{ vars.IMAGE_MIRROR_URL }}
 ```
+
+`tags` takes plain tags (`v1.2.3 latest`), `tag@digest` pairs, or full
+`ghcr.io/ethpandaops/<image>:<tag>` references. `image` defaults to the image
+in those references, or else the repository name.
 
 With goreleaser, point its `image_templates` at `ghcr.io/ethpandaops/...`
 and pass its artifact list instead of tags. The action mirrors every image and

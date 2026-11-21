@@ -11,11 +11,18 @@ inputs:
     required: false
   tags:
     description: >
-      Whitespace-separated tags already pushed to ghcr.io/ethpandaops/<image>.
-      Give each as tag@sha256:<digest>, with the digest your build step
-      output, so the action attests what this job pushed and fails if the tag
-      has moved since. A bare tag attests whatever it points to now. Not
-      needed with goreleaser-artifacts.
+      Tags already pushed to ghcr.io/ethpandaops/<image>, separated by spaces
+      or newlines. Each can be a tag, tag@sha256:<digest> or a full
+      ghcr.io/ethpandaops/<image>:<tag> reference, so docker/metadata-action's
+      'tags' output works as is. Give a digest (here or with 'digest') so the
+      action attests what this job pushed and fails if a tag has moved since;
+      a bare tag attests whatever it points to now. Not needed with
+      goreleaser-artifacts.
+    required: false
+  digest:
+    description: >
+      Digest every tag in 'tags' should point at, such as
+      docker/build-push-action's 'digest' output. Saves writing tag@digest.
     required: false
   goreleaser-artifacts:
     description: >
@@ -73,6 +80,7 @@ runs:
         IMAGE: ${{ inputs.image }}
         TAGS: ${{ inputs.tags }}
         ARTIFACTS: ${{ inputs.goreleaser-artifacts }}
+        DIGEST: ${{ inputs.digest }}
         REPO_NAME: ${{ github.event.repository.name }}
       run: |
         set -euo pipefail
@@ -93,7 +101,25 @@ runs:
           TAGS=$(awk -v img="$IMAGE" 'index($0, img ":") == 1 { print substr($0, length(img) + 2) }' <<<"$pushed" | tr '\n' ' ')
           [[ -n ${TAGS// /} ]] || err "goreleaser didn't push ghcr.io/ethpandaops/${IMAGE}."
         fi
+        if [[ -z $IMAGE ]]; then
+          # From full references, if that's what we were given.
+          IMAGE=$(tr -s ' \n' '\n\n' <<<"$TAGS" | sed -n 's|^ghcr\.io/ethpandaops/\([^:@]*\):.*|\1|p' | sort -u | head -1)
+        fi
         IMAGE=${IMAGE:-$REPO_NAME}
+        [[ -z $DIGEST || $DIGEST =~ ^sha256:[a-f0-9]{64}$ ]] || err "digest must be sha256:<64 hex>."
+        out=()
+        read -ra given <<<"$(tr -s ' \n' '  ' <<<"$TAGS")"
+        for item in "${given[@]}"; do
+          if [[ $item == */* ]]; then
+            [[ $item == "ghcr.io/ethpandaops/${IMAGE}:"* ]] || err "${item} isn't ghcr.io/ethpandaops/${IMAGE}. Run this step once per image."
+            item=${item#"ghcr.io/ethpandaops/${IMAGE}:"}
+          fi
+          if [[ -n $DIGEST && $item != *@* ]]; then
+            item="${item}@${DIGEST}"
+          fi
+          out+=("$item")
+        done
+        TAGS="${out[*]}"
         [[ -n ${TAGS// /} ]] || err "No tags to mirror. Set 'tags', or 'goreleaser-artifacts' for goreleaser builds."
         echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
         echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
@@ -217,7 +243,12 @@ runs:
         # than the mirror already answered.
         repo_ref="${GITHUB_REPOSITORY}@${GITHUB_REF}"
         case $code in
-          200) exit 0 ;;
+          200)
+            {
+              echo
+              echo "Published to Docker Hub: https://hub.docker.com/r/ethpandaops/${IMAGE}/tags"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0 ;;
           401) msg="The image mirror didn't accept this job's identity. Check the job has 'id-token: write' and that 'audience' is the mirror's." ;;
           403) msg="The image mirror won't publish ${IMAGE} from ${repo_ref}. If this repository should publish ${IMAGE}, ask the platform team to add it to the image-mirror allowlist (repository, branch or tag pattern, runner type)." ;;
           422) msg="The image mirror couldn't verify or copy ${IMAGE}; the response above says why. If you changed how or where this image is built or released, ask the platform team to update its image-mirror allowlist entry." ;;
