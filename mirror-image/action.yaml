@@ -1,0 +1,140 @@
+name: Mirror image to Docker Hub
+description: >
+  Attests images this job pushed to ghcr.io/ethpandaops/<image> and mirrors
+  them to Docker Hub. Needs id-token: write and attestations: write.
+
+inputs:
+  image:
+    description: Package name under ghcr.io/ethpandaops/
+    required: true
+  tags:
+    description: Whitespace-separated tags already pushed to ghcr.io/ethpandaops/<image>
+    required: true
+  mirror:
+    description: Set to "false" to attest only, without copying to Docker Hub
+    default: "true"
+  mirror-url:
+    description: Base URL of the mirror (vars.IMAGE_MIRROR_URL)
+    required: false
+  audience:
+    description: OIDC audience
+    default: image-mirror
+  github-token:
+    description: Token that can read the GHCR package (only needed for private packages)
+    default: ${{ github.token }}
+
+outputs:
+  digests:
+    description: Space-separated tag@digest pairs that were attested and mirrored
+    value: ${{ steps.resolve.outputs.pairs }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install regctl
+      shell: bash
+      run: |
+        set -euo pipefail
+        case "$(uname -m)" in
+          x86_64) arch=amd64 sum=3737fbbdd791e04e7a831640b681f3397a376498e80e2ad9b1b2d27296f239bc ;;
+          aarch64 | arm64) arch=arm64 sum=9f349bab5c407ac04f3dabf99c7c7a6b0f9e9723c23f2775380e804d02c6dbb9 ;;
+          *) echo "::error::unsupported arch $(uname -m)"; exit 1 ;;
+        esac
+        bin="${RUNNER_TEMP}/mirror-image-bin"
+        mkdir -p "$bin"
+        curl -fsSL -o "$bin/regctl" "https://github.com/regclient/regclient/releases/download/v0.11.7/regctl-linux-${arch}"
+        echo "${sum}  $bin/regctl" | sha256sum -c --quiet -
+        chmod +x "$bin/regctl"
+        echo "$bin" >> "$GITHUB_PATH"
+
+    - name: Resolve digests
+      id: resolve
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        TAGS: ${{ inputs.tags }}
+        GHCR_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        [[ $IMAGE =~ ^[a-z0-9][a-z0-9._-]{0,127}$ ]] || { echo "::error::invalid image name"; exit 1; }
+        src="ghcr.io/ethpandaops/${IMAGE}"
+        regctl registry login ghcr.io -u x-access-token --pass-stdin <<<"$GHCR_TOKEN" >/dev/null
+
+        declare -A seen
+        tree() {
+          local d=$1
+          [[ -n ${seen[$d]:-} ]] && return 0
+          seen[$d]=1
+          while read -r child; do
+            [[ -n $child ]] && tree "$child"
+          done < <(regctl manifest get "${src}@${d}" --format raw-body | jq -r '(.manifests // [])[]
+            | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest")
+            | .digest')
+        }
+
+        pairs=()
+        for tag in $TAGS; do
+          d=$(regctl image digest "${src}:${tag}")
+          pairs+=("${tag}@${d}")
+          tree "$d"
+        done
+
+        checksums="${RUNNER_TEMP}/mirror-image-subjects.txt"
+        : > "$checksums"
+        for d in "${!seen[@]}"; do
+          echo "${d#sha256:}  ${src}" >> "$checksums"
+        done
+        echo "Attesting ${#seen[@]} manifests behind ${#pairs[@]} tags"
+        echo "pairs=${pairs[*]}" >> "$GITHUB_OUTPUT"
+        echo "checksums=${checksums}" >> "$GITHUB_OUTPUT"
+
+    - name: Attest
+      uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      with:
+        subject-checksums: ${{ steps.resolve.outputs.checksums }}
+
+    - name: Mirror to Docker Hub
+      if: inputs.mirror == 'true'
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        PAIRS: ${{ steps.resolve.outputs.pairs }}
+        MIRROR_URL: ${{ inputs.mirror-url }}
+        AUDIENCE: ${{ inputs.audience }}
+      run: |
+        set -euo pipefail
+        [[ -n ${ACTIONS_ID_TOKEN_REQUEST_URL:-} ]] || { echo "::error::the job needs permissions: id-token: write"; exit 1; }
+        [[ -n ${MIRROR_URL} ]] || { echo "::error::mirror-url is not set"; exit 1; }
+        mint() {
+          curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}" | jq -r .value
+        }
+        resp="${RUNNER_TEMP}/mirror-response.txt"
+        body=$(jq -n --arg image "$IMAGE" --arg pairs "$PAIRS" '{image: $image, tags: ($pairs | split(" "))}')
+        start=$(date +%s)
+
+        # The token is passed as a header on stdin, never on the command line.
+        t=$(mint); echo "::add-mask::${t}"
+        code=$(printf 'Authorization: Bearer %s\n' "$t" | curl -sS --max-time 90 -H @- -H "Content-Type: application/json" \
+          --data "$body" -o "$resp" -w '%{http_code}' "${MIRROR_URL%/}/v1/mirror") || code=000
+        if [[ $code == 202 ]]; then
+          id=$(tr -dc 'a-f0-9' < "$resp")
+          echo "Mirror job ${id} running"
+          deadline=$(( $(date +%s) + 1200 ))
+          while (( $(date +%s) < deadline )); do
+            sleep 5
+            t=$(mint); echo "::add-mask::${t}"
+            code=$(printf 'Authorization: Bearer %s\n' "$t" | curl -sS --max-time 30 -H @- -o "$resp" -w '%{http_code}' \
+              "${MIRROR_URL%/}/v1/jobs/${id}") || code=000
+            [[ $code == 202 || $code == 000 || $code == 5* ]] || break
+          done
+        fi
+        cat "$resp" 2>/dev/null || true
+        echo "Mirror answered HTTP ${code} after $(( $(date +%s) - start ))s"
+        {
+          echo "### Mirror: HTTP ${code} after $(( $(date +%s) - start ))s"
+          echo '```'
+          cat "$resp" 2>/dev/null || true
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+        [[ $code == 200 ]]
