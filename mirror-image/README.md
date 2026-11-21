@@ -45,6 +45,45 @@ manifest goreleaser pushed, by digest:
 If goreleaser pushes more than one image, run the step once per image with
 `image` set.
 
+### Releases: mirror in its own job
+
+If the mirror step fails, don't re-run the job that built the images: a
+rebuild pushes new digests to the same tags, which nothing has attested, and a
+goreleaser re-run also fails on the release assets it already uploaded.
+Instead, attest in the build job and mirror in a job of its own, so "Re-run
+failed jobs" repeats only the mirror:
+
+```yaml
+jobs:
+  release:
+    permissions: { contents: write, packages: write, id-token: write, attestations: write }
+    outputs:
+      image: ${{ steps.attest.outputs.image }}
+      digests: ${{ steps.attest.outputs.digests }}
+    steps:
+      # ... goreleaser release ...
+      - id: attest
+        uses: ethpandaops/actions/mirror-image@<sha>
+        with:
+          goreleaser-artifacts: dist/artifacts.json
+          mirror: "false"
+
+  mirror:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: read, id-token: write }
+    steps:
+      - uses: ethpandaops/actions/mirror-image@<sha>
+        with:
+          image: ${{ needs.release.outputs.image }}
+          tags: ${{ needs.release.outputs.digests }}
+          attest: "false"
+          mirror-url: ${{ secrets.IMAGE_MIRROR_URL }}
+```
+
+The mirror job passes the exact digests the build job attested, so it fails
+rather than mirroring anything that moved since.
+
 `mirror-url` comes from the `IMAGE_MIRROR_URL` organization secret, so it's
 masked in logs. It has to be passed in: composite actions can't read secrets
 or variables themselves.
