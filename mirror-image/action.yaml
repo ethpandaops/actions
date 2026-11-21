@@ -1,0 +1,265 @@
+name: Mirror image to Docker Hub
+description: >
+  Attests images this job pushed to ghcr.io/ethpandaops/<image> and mirrors
+  them to Docker Hub. Needs id-token: write and attestations: write.
+
+inputs:
+  image:
+    description: >
+      Package name under ghcr.io/ethpandaops/. Defaults to the image in
+      goreleaser-artifacts, or else the repository name.
+    required: false
+  tags:
+    description: >
+      Tags already pushed to ghcr.io/ethpandaops/<image>, separated by spaces
+      or newlines. Each can be a tag, tag@sha256:<digest> or a full
+      ghcr.io/ethpandaops/<image>:<tag> reference, so docker/metadata-action's
+      'tags' output works as is. Give a digest (here or with 'digest') so the
+      action attests what this job pushed and fails if a tag has moved since;
+      a bare tag attests whatever it points to now. Not needed with
+      goreleaser-artifacts.
+    required: false
+  digest:
+    description: >
+      Digest every tag in 'tags' should point at, such as
+      docker/build-push-action's 'digest' output. Saves writing tag@digest.
+    required: false
+  goreleaser-artifacts:
+    description: >
+      Path to goreleaser's dist/artifacts.json. The images and manifests it
+      pushed to ghcr.io/ethpandaops, with their digests, become the tags.
+    required: false
+  attest-platforms:
+    description: >
+      Also attest the per-platform manifests behind each tag. Set to "false"
+      when other jobs built them (split per-platform builds); each of those
+      jobs must then attest its own digest, so the attestation records the
+      runner that actually built it.
+    default: "true"
+  mirror:
+    description: Set to "false" to attest only, without copying to Docker Hub
+    default: "true"
+  mirror-url:
+    description: Base URL of the mirror (secrets.IMAGE_MIRROR_URL)
+    required: false
+  audience:
+    description: OIDC audience
+    default: image-mirror
+  github-token:
+    description: Token that can read the GHCR package (only needed for private packages)
+    default: ${{ github.token }}
+
+outputs:
+  digests:
+    description: Space-separated tag@digest pairs that were attested and mirrored
+    value: ${{ steps.resolve.outputs.pairs }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install regctl
+      shell: bash
+      run: |
+        set -euo pipefail
+        case "$(uname -m)" in
+          x86_64) arch=amd64 sum=3737fbbdd791e04e7a831640b681f3397a376498e80e2ad9b1b2d27296f239bc ;;
+          aarch64 | arm64) arch=arm64 sum=9f349bab5c407ac04f3dabf99c7c7a6b0f9e9723c23f2775380e804d02c6dbb9 ;;
+          *) echo "::error::unsupported arch $(uname -m)"; exit 1 ;;
+        esac
+        bin="${RUNNER_TEMP}/mirror-image-bin"
+        mkdir -p "$bin"
+        curl -fsSL -o "$bin/regctl" "https://github.com/regclient/regclient/releases/download/v0.11.7/regctl-linux-${arch}"
+        echo "${sum}  $bin/regctl" | sha256sum -c --quiet -
+        chmod +x "$bin/regctl"
+        echo "$bin" >> "$GITHUB_PATH"
+
+    - name: Collect images
+      id: collect
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        TAGS: ${{ inputs.tags }}
+        ARTIFACTS: ${{ inputs.goreleaser-artifacts }}
+        DIGEST: ${{ inputs.digest }}
+        REPO_NAME: ${{ github.event.repository.name }}
+      run: |
+        set -euo pipefail
+        err() { echo "::error title=image-mirror::$*"; exit 1; }
+        if [[ -n $ARTIFACTS ]]; then
+          [[ -z $TAGS ]] || err "Set either tags or goreleaser-artifacts, not both."
+          [[ -f $ARTIFACTS ]] || err "${ARTIFACTS} not found. Run this step after goreleaser, in the same job."
+          # name:tag@digest for every image and manifest goreleaser pushed to GHCR.
+          pushed=$(jq -r '.[] | select(.type == "Docker Image" or .type == "Published Docker Image" or .type == "Docker Manifest")
+            | select(.name | startswith("ghcr.io/ethpandaops/"))
+            | (.name | ltrimstr("ghcr.io/ethpandaops/")) + (if (.extra.Digest // "") != "" then "@" + .extra.Digest else "" end)' "$ARTIFACTS" | sort -u)
+          [[ -n $pushed ]] || err "goreleaser didn't push any images to ghcr.io/ethpandaops. Point its image_templates at ghcr.io/ethpandaops/<image>."
+          images=$(sed 's/:.*//' <<<"$pushed" | sort -u)
+          if [[ -z $IMAGE ]]; then
+            (( $(wc -l <<<"$images") == 1 )) || err "goreleaser pushed several images ($(tr '\n' ' ' <<<"$images")). Run this step once per image with 'image' set."
+            IMAGE=$images
+          fi
+          # goreleaser lists a pushed image both as built (no digest) and as
+          # published (with digest); keep one entry per tag, preferring the digest.
+          TAGS=$(awk -v img="$IMAGE" 'index($0, img ":") == 1 {
+              item = substr($0, length(img) + 2); tag = item; sub(/@.*/, "", tag)
+              if (!(tag in seen) || item ~ /@/) seen[tag] = item
+            } END { for (t in seen) print seen[t] }' <<<"$pushed" | sort | tr '\n' ' ')
+          [[ -n ${TAGS// /} ]] || err "goreleaser didn't push ghcr.io/ethpandaops/${IMAGE}."
+        fi
+        if [[ -z $IMAGE ]]; then
+          # From full references, if that's what we were given.
+          IMAGE=$(tr -s ' \n' '\n\n' <<<"$TAGS" | sed -n 's|^ghcr\.io/ethpandaops/\([^:@]*\):.*|\1|p' | sort -u | head -1)
+        fi
+        IMAGE=${IMAGE:-$REPO_NAME}
+        [[ -z $DIGEST || $DIGEST =~ ^sha256:[a-f0-9]{64}$ ]] || err "digest must be sha256:<64 hex>."
+        out=()
+        read -ra given <<<"$(tr -s ' \n' '  ' <<<"$TAGS")"
+        for item in "${given[@]}"; do
+          if [[ $item == */* ]]; then
+            [[ $item == "ghcr.io/ethpandaops/${IMAGE}:"* ]] || err "${item} isn't ghcr.io/ethpandaops/${IMAGE}. Run this step once per image."
+            item=${item#"ghcr.io/ethpandaops/${IMAGE}:"}
+          fi
+          if [[ -n $DIGEST && $item != *@* ]]; then
+            item="${item}@${DIGEST}"
+          fi
+          out+=("$item")
+        done
+        TAGS="${out[*]}"
+        [[ -n ${TAGS// /} ]] || err "No tags to mirror. Set 'tags', or 'goreleaser-artifacts' for goreleaser builds."
+        echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+        echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+    - name: Resolve digests
+      id: resolve
+      shell: bash
+      env:
+        IMAGE: ${{ steps.collect.outputs.image }}
+        TAGS: ${{ steps.collect.outputs.tags }}
+        ATTEST_PLATFORMS: ${{ inputs.attest-platforms }}
+        GHCR_TOKEN: ${{ inputs.github-token }}
+        # Keep the registry login in this job's temp dir, not the runner's home.
+        REGCTL_CONFIG: ${{ runner.temp }}/mirror-image-regctl/config.json
+      run: |
+        set -euo pipefail
+        [[ $IMAGE =~ ^[a-z0-9][a-z0-9._-]{0,127}$ ]] || { echo "::error::invalid image name"; exit 1; }
+        [[ $ATTEST_PLATFORMS == true || $ATTEST_PLATFORMS == false ]] || { echo "::error::attest-platforms must be true or false"; exit 1; }
+        src="ghcr.io/ethpandaops/${IMAGE}"
+        regctl registry login ghcr.io -u x-access-token --pass-stdin <<<"$GHCR_TOKEN" >/dev/null
+
+        declare -A seen=()
+        tree() {
+          local d=$1 child
+          [[ -n ${seen[$d]:-} ]] && return 0
+          seen[$d]=1
+          [[ $ATTEST_PLATFORMS == true ]] || return 0
+          while read -r child; do
+            [[ -n $child ]] && tree "$child"
+          done < <(regctl manifest get "${src}@${d}" --format raw-body | jq -r '(.manifests // [])[]
+            | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest")
+            | .digest')
+        }
+
+        read -ra items <<<"$TAGS"
+        (( ${#items[@]} > 0 )) || { echo "::error::no tags given"; exit 1; }
+        pairs=()
+        for item in "${items[@]}"; do
+          tag=${item%%@*}
+          [[ $tag =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] || { echo "::error::invalid tag ${tag}"; exit 1; }
+          d=$(regctl image digest "${src}:${tag}" 2>/dev/null) || {
+            echo "::error title=image-mirror::${src}:${tag} isn't in GHCR. Push it in this job, before this step."
+            exit 1
+          }
+          if [[ $item == *@* ]]; then
+            want=${item#*@}
+            [[ $want =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "::error::invalid digest for ${tag}"; exit 1; }
+            [[ $d == "$want" ]] || { echo "::error::${src}:${tag} is ${d}, not ${want}"; exit 1; }
+          else
+            echo "::warning::${tag} given without a digest; attesting whatever it points to now (${d})"
+          fi
+          pairs+=("${tag}@${d}")
+          tree "$d"
+        done
+
+        checksums="${RUNNER_TEMP}/mirror-image-subjects.txt"
+        : > "$checksums"
+        for d in "${!seen[@]}"; do
+          echo "${d#sha256:}  ${src}" >> "$checksums"
+        done
+        echo "Attesting ${#seen[@]} manifests behind ${#pairs[@]} tags"
+        echo "pairs=${pairs[*]}" >> "$GITHUB_OUTPUT"
+        echo "checksums=${checksums}" >> "$GITHUB_OUTPUT"
+
+    - name: Attest
+      uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      with:
+        subject-checksums: ${{ steps.resolve.outputs.checksums }}
+
+    - name: Mirror to Docker Hub
+      if: inputs.mirror == 'true'
+      shell: bash
+      env:
+        IMAGE: ${{ steps.collect.outputs.image }}
+        PAIRS: ${{ steps.resolve.outputs.pairs }}
+        MIRROR_URL: ${{ inputs.mirror-url }}
+        AUDIENCE: ${{ inputs.audience }}
+      run: |
+        set -euo pipefail
+        [[ -n ${ACTIONS_ID_TOKEN_REQUEST_URL:-} ]] || { echo "::error title=image-mirror::This job can't authenticate to the image mirror. Add 'id-token: write' to the job's permissions."; exit 1; }
+        [[ -n ${MIRROR_URL} ]] || { echo "::error title=image-mirror::mirror-url is empty. Pass the IMAGE_MIRROR_URL organization secret as mirror-url; if it isn't visible to this repository, ask the platform team."; exit 1; }
+        # The request carries an OIDC token that the mirror accepts for this repo.
+        [[ $MIRROR_URL == https://* ]] || { echo "::error title=image-mirror::mirror-url must be an https URL."; exit 1; }
+        mint() {
+          curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}" | jq -r .value
+        }
+        resp="${RUNNER_TEMP}/mirror-response.txt"
+        body=$(jq -n --arg image "$IMAGE" --arg pairs "$PAIRS" '{image: $image, tags: ($pairs | split(" "))}')
+        start=$(date +%s)
+
+        # The token is passed as a header on stdin, never on the command line.
+        t=$(mint); echo "::add-mask::${t}"
+        code=$(printf 'Authorization: Bearer %s\n' "$t" | curl -sS --max-time 90 -H @- -H "Content-Type: application/json" \
+          --data "$body" -o "$resp" -w '%{http_code}' "${MIRROR_URL%/}/v1/mirror") || code=000
+        if [[ $code == 202 ]]; then
+          id=$(tr -dc 'a-f0-9' < "$resp")
+          echo "Mirror job ${id} running"
+          deadline=$(( $(date +%s) + 1200 ))
+          while (( $(date +%s) < deadline )); do
+            sleep 5
+            t=$(mint); echo "::add-mask::${t}"
+            code=$(printf 'Authorization: Bearer %s\n' "$t" | curl -sS --max-time 30 -H @- -o "$resp" -w '%{http_code}' \
+              "${MIRROR_URL%/}/v1/jobs/${id}") || code=000
+            [[ $code == 202 || $code == 000 || $code == 5* ]] || break
+          done
+        fi
+        # The response is printed as data, never as workflow commands.
+        stop=$(od -An -tx1 -N16 /dev/urandom | tr -d " \n")
+        echo "::stop-commands::${stop}"
+        cat "$resp" 2>/dev/null || true
+        echo "::${stop}::"
+        echo "Mirror answered HTTP ${code} after $(( $(date +%s) - start ))s"
+        {
+          echo "### Mirror: HTTP ${code} after $(( $(date +%s) - start ))s"
+          echo '```'
+          cat "$resp" 2>/dev/null || true
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+        # A clear next step for a legitimate maintainer, without saying more
+        # than the mirror already answered.
+        repo_ref="${GITHUB_REPOSITORY}@${GITHUB_REF}"
+        case $code in
+          200)
+            {
+              echo
+              echo "Published to Docker Hub: https://hub.docker.com/r/ethpandaops/${IMAGE}/tags"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0 ;;
+          401) msg="The image mirror didn't accept this job's identity. Check the job has 'id-token: write' and that 'audience' is the mirror's." ;;
+          403) msg="The image mirror won't publish ${IMAGE} from ${repo_ref}. If this repository should publish ${IMAGE}, ask the platform team to add it to the image-mirror allowlist (repository, branch or tag pattern, runner type)." ;;
+          422) msg="The image mirror couldn't verify or copy ${IMAGE}; the response above says why. If you changed how or where this image is built or released, ask the platform team to update its image-mirror allowlist entry." ;;
+          429) msg="The image mirror is busy. Re-run this job in a few minutes." ;;
+          *) msg="The image mirror didn't answer (HTTP ${code}). Re-run this job; if it keeps failing, tell the platform team. The image is already in GHCR." ;;
+        esac
+        echo "::error title=image-mirror::${msg}"
+        echo "**${msg}**" >> "$GITHUB_STEP_SUMMARY"
+        exit 1
