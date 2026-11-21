@@ -24,7 +24,7 @@ steps:
     with:
       tags: ${{ steps.meta.outputs.tags }}
       digest: ${{ steps.build.outputs.digest }}
-      mirror-url: ${{ vars.IMAGE_MIRROR_URL }}
+      mirror-url: ${{ secrets.IMAGE_MIRROR_URL }}
 ```
 
 `tags` takes plain tags (`v1.2.3 latest`), `tag@digest` pairs, or full
@@ -39,14 +39,15 @@ manifest goreleaser pushed, by digest:
   - uses: ethpandaops/actions/mirror-image@master
     with:
       goreleaser-artifacts: dist/artifacts.json
-      mirror-url: ${{ vars.IMAGE_MIRROR_URL }}
+      mirror-url: ${{ secrets.IMAGE_MIRROR_URL }}
 ```
 
 If goreleaser pushes more than one image, run the step once per image with
 `image` set.
 
-`mirror-url` has to be passed in: composite actions can't read organization
-variables themselves.
+`mirror-url` comes from the `IMAGE_MIRROR_URL` organization secret, so it's
+masked in logs. It has to be passed in: composite actions can't read secrets
+or variables themselves.
 
 If the mirror refuses, the step fails and says what to do next, for example
 asking the platform team to add the repository to the mirror's allowlist.

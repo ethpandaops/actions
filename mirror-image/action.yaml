@@ -40,7 +40,7 @@ inputs:
     description: Set to "false" to attest only, without copying to Docker Hub
     default: "true"
   mirror-url:
-    description: Base URL of the mirror (vars.IMAGE_MIRROR_URL)
+    description: Base URL of the mirror (secrets.IMAGE_MIRROR_URL)
     required: false
   audience:
     description: OIDC audience
@@ -200,7 +200,7 @@ runs:
       run: |
         set -euo pipefail
         [[ -n ${ACTIONS_ID_TOKEN_REQUEST_URL:-} ]] || { echo "::error title=image-mirror::This job can't authenticate to the image mirror. Add 'id-token: write' to the job's permissions."; exit 1; }
-        [[ -n ${MIRROR_URL} ]] || { echo "::error title=image-mirror::mirror-url is empty. Pass the IMAGE_MIRROR_URL organization variable as mirror-url; if it isn't visible to this repository, ask the platform team."; exit 1; }
+        [[ -n ${MIRROR_URL} ]] || { echo "::error title=image-mirror::mirror-url is empty. Pass the IMAGE_MIRROR_URL organization secret as mirror-url; if it isn't visible to this repository, ask the platform team."; exit 1; }
         # The request carries an OIDC token that the mirror accepts for this repo.
         [[ $MIRROR_URL == https://* ]] || { echo "::error title=image-mirror::mirror-url must be an https URL."; exit 1; }
         mint() {
