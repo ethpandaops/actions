@@ -67,20 +67,30 @@ So attest only what this job built:
 
 ### Split builds
 
-If per-platform images are built in other jobs (for example on self-hosted
-runners) and this job only merges them into an index, set
-`attest-platforms: "false"`. The action then attests only the index. Each
-platform job must attest its own digest, so its attestation records the
-runner that built it:
+If per-platform images are built in other jobs and this job only merges them
+into an index, who should attest the platform manifests depends on where they
+were built.
+
+**All jobs on GitHub-hosted runners:** leave `attest-platforms` at its default.
+This job attests the index and every platform manifest behind it, which is
+correct because every builder ran on a GitHub-hosted runner in the same run.
+
+**Platform jobs on self-hosted runners:** set `attest-platforms: "false"` on
+the merge job, and have each platform job attest what it built, so its
+attestation records the runner that actually built it. Attest the platform
+manifest itself, not what `docker/build-push-action` returns: with provenance
+on (its default), its `digest` output is a per-platform index, and
+`imagetools create` flattens that away, leaving the manifests the mirror checks
+unattested. Push with `provenance: false`, or resolve the manifest digest from
+the index, before attesting:
 
 ```yaml
-  # in each platform job, after pushing by digest
+  # in each platform job, after pushing by digest with provenance: false
   - uses: actions/attest-build-provenance@...
     with:
       subject-name: ghcr.io/ethpandaops/my-image
       subject-digest: ${{ steps.build.outputs.digest }}
 ```
 
-Otherwise this job would attest the self-hosted output as built on a
-GitHub-hosted runner. The mirror refuses self-hosted attestations unless the
-image's allowlist entry allows them.
+The mirror refuses self-hosted attestations unless the image's allowlist entry
+allows them.
