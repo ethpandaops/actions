@@ -98,7 +98,12 @@ runs:
             (( $(wc -l <<<"$images") == 1 )) || err "goreleaser pushed several images ($(tr '\n' ' ' <<<"$images")). Run this step once per image with 'image' set."
             IMAGE=$images
           fi
-          TAGS=$(awk -v img="$IMAGE" 'index($0, img ":") == 1 { print substr($0, length(img) + 2) }' <<<"$pushed" | tr '\n' ' ')
+          # goreleaser lists a pushed image both as built (no digest) and as
+          # published (with digest); keep one entry per tag, preferring the digest.
+          TAGS=$(awk -v img="$IMAGE" 'index($0, img ":") == 1 {
+              item = substr($0, length(img) + 2); tag = item; sub(/@.*/, "", tag)
+              if (!(tag in seen) || item ~ /@/) seen[tag] = item
+            } END { for (t in seen) print seen[t] }' <<<"$pushed" | sort | tr '\n' ' ')
           [[ -n ${TAGS// /} ]] || err "goreleaser didn't push ghcr.io/ethpandaops/${IMAGE}."
         fi
         if [[ -z $IMAGE ]]; then
