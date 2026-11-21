@@ -94,7 +94,10 @@ runs:
         for item in "${items[@]}"; do
           tag=${item%%@*}
           [[ $tag =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] || { echo "::error::invalid tag ${tag}"; exit 1; }
-          d=$(regctl image digest "${src}:${tag}")
+          d=$(regctl image digest "${src}:${tag}" 2>/dev/null) || {
+            echo "::error title=image-mirror::${src}:${tag} isn't in GHCR. Push it in this job, before this step."
+            exit 1
+          }
           if [[ $item == *@* ]]; then
             want=${item#*@}
             [[ $want =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "::error::invalid digest for ${tag}"; exit 1; }
@@ -130,10 +133,10 @@ runs:
         AUDIENCE: ${{ inputs.audience }}
       run: |
         set -euo pipefail
-        [[ -n ${ACTIONS_ID_TOKEN_REQUEST_URL:-} ]] || { echo "::error::the job needs permissions: id-token: write"; exit 1; }
-        [[ -n ${MIRROR_URL} ]] || { echo "::error::mirror-url is not set"; exit 1; }
+        [[ -n ${ACTIONS_ID_TOKEN_REQUEST_URL:-} ]] || { echo "::error title=image-mirror::This job can't authenticate to the image mirror. Add 'id-token: write' to the job's permissions."; exit 1; }
+        [[ -n ${MIRROR_URL} ]] || { echo "::error title=image-mirror::mirror-url is empty. Pass the IMAGE_MIRROR_URL organization variable as mirror-url; if it isn't visible to this repository, ask the platform team."; exit 1; }
         # The request carries an OIDC token that the mirror accepts for this repo.
-        [[ $MIRROR_URL == https://* ]] || { echo "::error::mirror-url must be https"; exit 1; }
+        [[ $MIRROR_URL == https://* ]] || { echo "::error title=image-mirror::mirror-url must be an https URL."; exit 1; }
         mint() {
           curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}" | jq -r .value
@@ -170,4 +173,17 @@ runs:
           cat "$resp" 2>/dev/null || true
           echo '```'
         } >> "$GITHUB_STEP_SUMMARY"
-        [[ $code == 200 ]]
+        # A clear next step for a legitimate maintainer, without saying more
+        # than the mirror already answered.
+        repo_ref="${GITHUB_REPOSITORY}@${GITHUB_REF}"
+        case $code in
+          200) exit 0 ;;
+          401) msg="The image mirror didn't accept this job's identity. Check the job has 'id-token: write' and that 'audience' is the mirror's." ;;
+          403) msg="The image mirror won't publish ${IMAGE} from ${repo_ref}. If this repository should publish ${IMAGE}, ask the platform team to add it to the image-mirror allowlist (repository, branch or tag pattern, runner type)." ;;
+          422) msg="The image mirror couldn't verify or copy ${IMAGE}; the response above says why. If you changed how or where this image is built or released, ask the platform team to update its image-mirror allowlist entry." ;;
+          429) msg="The image mirror is busy. Re-run this job in a few minutes." ;;
+          *) msg="The image mirror didn't answer (HTTP ${code}). Re-run this job; if it keeps failing, tell the platform team. The image is already in GHCR." ;;
+        esac
+        echo "::error title=image-mirror::${msg}"
+        echo "**${msg}**" >> "$GITHUB_STEP_SUMMARY"
+        exit 1
